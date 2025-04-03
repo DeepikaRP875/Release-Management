@@ -1,0 +1,61 @@
+name: Terraform Plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run plan against (dev or uat)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - uat
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    # Only allow dev environment for feature branch and uat for main branch
+    if: >
+      (github.event.inputs.environment == 'dev' && github.ref == 'refs/heads/feature') ||
+      (github.event.inputs.environment == 'uat' && github.ref == 'refs/heads/main')
+    
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.0.0
+          
+      - name: Configure AWS credentials from AWS account
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+              role-to-assume: ${{ secrets.AWS_ROLE }}
+              aws-region: ${{ secrets.AWS_REGION }}
+              role-session-name: GitHub-OIDC-TERRAFORM
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "dev" ]]; then
+            terraform plan -var-file=dev.tfvars -out=plan.tfplan
+          else
+            terraform plan -var-file=uat.tfvars -out=plan.tfplan
+          fi
+        
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.event.inputs.environment }}
+          path: plan.tfplan
+          retention-days: 5
