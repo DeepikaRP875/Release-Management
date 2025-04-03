@@ -21,7 +21,7 @@ resource "aws_ssm_parameter" "uat" {
   
   name  = "/config/uat/parameter"
   type  = "String"
-  value = "Deepika"
+  value = "dpka"
   
   tags = {
     Environment = "uat"
