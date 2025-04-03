@@ -1,0 +1,29 @@
+provider "aws" {
+  region = var.aws_region
+}
+
+# Parameter Store resources for Dev
+resource "aws_ssm_parameter" "dev" {
+  count = var.environment == "dev" ? 1 : 0
+  
+  name  = "/config/dev/parameter"
+  type  = "String"
+  value = "Dp"
+  
+  tags = {
+    Environment = "dev"
+  }
+}
+
+# Parameter Store resources for UAT
+resource "aws_ssm_parameter" "uat" {
+  count = var.environment == "uat" ? 1 : 0
+  
+  name  = "/config/uat/parameter"
+  type  = "String"
+  value = "Deepika"
+  
+  tags = {
+    Environment = "uat"
+  }
+}
