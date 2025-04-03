@@ -19,7 +19,7 @@ resource "aws_ssm_parameter" "dev" {
 resource "aws_ssm_parameter" "uat" {
   count = var.environment == "uat" ? 1 : 0
   
-  name  = "/config/uat/parameter"
+  name  = "/config/uat/parameters"
   type  = "String"
   value = "dpka"
   
