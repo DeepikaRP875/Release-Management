@@ -1,0 +1,273 @@
+name: Jira Release Notes
+
+on:
+  workflow_run:
+    workflows: ['Terraform Apply']
+    types:
+      - completed
+
+jobs:
+  create-release-notes:
+    runs-on: ubuntu-latest
+    # Only run for successful deployments
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Get workflow details
+        id: workflow-details
+        run: |
+          echo "workflow_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+          echo "run_number=${{ github.event.workflow_run.run_number }}" >> $GITHUB_OUTPUT
+          
+          # Determine environment from branch
+          if [[ "${{ github.event.workflow_run.head_branch }}" == "feature" ]]; then
+            echo "environment=dev" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.workflow_run.head_branch }}" == "main" ]]; then
+            echo "environment=uat" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Download workflow artifacts
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          workflow: Terraform Apply
+          run_id: ${{ github.event.workflow_run.id }}
+          path: artifacts
+      
+      - name: Generate version number
+        id: version
+        run: |
+          ENVIRONMENT="${{ steps.workflow-details.outputs.environment }}"
+          DATE=$(date +%Y%m%d)
+          BUILD_NUMBER=${{ github.event.workflow_run.run_number }}
+          
+          # Create version number
+          VERSION="${ENVIRONMENT}-v${DATE}.${BUILD_NUMBER}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+      
+      - name: Extract Jira IDs and commit details
+        id: extract-details
+        run: |
+          ENVIRONMENT="${{ steps.workflow-details.outputs.environment }}"
+          BRANCH="feature"
+          if [[ "$ENVIRONMENT" == "uat" ]]; then
+            BRANCH="main"
+          fi
+          
+          # Get previous tag if exists
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 --match="${ENVIRONMENT}-v*" 2>/dev/null || echo "")
+          
+          # If no previous tag found, use the last 20 commits
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found. Using last 20 commits."
+            git log -20 --pretty=format:"%h|%an|%ae|%s" > commit_details.txt
+          else
+            echo "Found previous tag: ${PREVIOUS_TAG}. Getting commits since then."
+            git log ${PREVIOUS_TAG}..HEAD --pretty=format:"%h|%an|%ae|%s" > commit_details.txt
+          fi
+          
+          # Extract Jira IDs from commit messages
+          cat commit_details.txt | grep -o "[A-Z]\+-[0-9]\+" | sort | uniq > jira_ids.txt
+          
+          # Create a JSON array of Jira IDs
+          echo "jira_ids=$(cat jira_ids.txt | jq -R . | jq -s .)" >> $GITHUB_OUTPUT
+          
+          # Count number of commits and Jira issues
+          COMMIT_COUNT=$(cat commit_details.txt | wc -l)
+          JIRA_COUNT=$(cat jira_ids.txt | wc -l)
+          
+          echo "commit_count=${COMMIT_COUNT}" >> $GITHUB_OUTPUT
+          echo "jira_count=${JIRA_COUNT}" >> $GITHUB_OUTPUT
+      
+      - name: Generate HTML release notes
+        run: |
+          ENVIRONMENT="${{ steps.workflow-details.outputs.environment }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          COMMIT_COUNT="${{ steps.extract-details.outputs.commit_count }}"
+          JIRA_COUNT="${{ steps.extract-details.outputs.jira_count }}"
+          
+          # Create HTML release notes
+          cat > release-notes.html << EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>${ENVIRONMENT} Release - ${VERSION}</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              h1 { color: #333; }
+              .summary { background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+              table { border-collapse: collapse; width: 100%; }
+              th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+              th { background-color: #f2f2f2; }
+              tr:nth-child(even) { background-color: #f9f9f9; }
+              .jira-link { font-weight: bold; }
+            </style>
+          </head>
+          <body>
+            <h1>${ENVIRONMENT} Release - ${VERSION}</h1>
+            
+            <div class="summary">
+              <h2>Deployment Summary</h2>
+              <p><strong>Environment:</strong> ${ENVIRONMENT}</p>
+              <p><strong>Version:</strong> ${VERSION}</p>
+              <p><strong>Date:</strong> $(date +"%Y-%m-%d %H:%M:%S")</p>
+              <p><strong>Branch:</strong> ${{ github.event.workflow_run.head_branch }}</p>
+              <p><strong>Commits:</strong> ${COMMIT_COUNT}</p>
+              <p><strong>Jira issues:</strong> ${JIRA_COUNT}</p>
+            </div>
+            
+            <h2>Changes Included</h2>
+            <table>
+              <tr>
+                <th>Commit</th>
+                <th>Author</th>
+                <th>Message</th>
+                <th>Jira ID</th>
+              </tr>
+          EOF
+          
+          # Add each commit as a table row
+          while IFS="|" read -r HASH AUTHOR EMAIL MESSAGE; do
+            # Extract Jira ID from message if present
+            JIRA_ID=$(echo "$MESSAGE" | grep -o "[A-Z]\+-[0-9]\+" || echo "")
+            
+            # Add to HTML
+            cat >> release-notes.html << ROW
+              <tr>
+                <td><a href="https://github.com/${{ github.repository }}/commit/${HASH}">${HASH:0:7}</a></td>
+                <td>${AUTHOR} &lt;${EMAIL}&gt;</td>
+                <td>${MESSAGE}</td>
+                <td>${JIRA_ID}</td>
+              </tr>
+          ROW
+          done < commit_details.txt
+          
+          # Close HTML
+          cat >> release-notes.html << EOF
+            </table>
+            
+            <h2>Jira Issues</h2>
+            <ul>
+          EOF
+          
+          # Add each Jira ID as a list item
+          while read -r JIRA_ID; do
+            cat >> release-notes.html << ROW
+              <li><a href="${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}/browse/${JIRA_ID}" class="jira-link">${JIRA_ID}</a></li>
+          ROW
+          done < jira_ids.txt
+          
+          # Close HTML
+          cat >> release-notes.html << EOF
+            </ul>
+          </body>
+          </html>
+          EOF
+          
+          # Create markdown version for Jira
+          cat > release-notes.md << EOF
+          # ${ENVIRONMENT} Release - ${VERSION}
+          
+          ## Deployment Summary
+          * **Environment:** ${ENVIRONMENT}
+          * **Version:** ${VERSION}
+          * **Date:** $(date +"%Y-%m-%d %H:%M:%S")
+          * **Branch:** ${{ github.event.workflow_run.head_branch }}
+          * **Commits:** ${COMMIT_COUNT}
+          * **Jira issues:** ${JIRA_COUNT}
+          
+          ## Changes Included
+          
+          | Commit | Author | Message | Jira ID |
+          | ------ | ------ | ------- | ------- |
+          EOF
+          
+          # Add each commit as a table row in markdown
+          while IFS="|" read -r HASH AUTHOR EMAIL MESSAGE; do
+            # Extract Jira ID from message if present
+            JIRA_ID=$(echo "$MESSAGE" | grep -o "[A-Z]\+-[0-9]\+" || echo "")
+            
+            # Add to markdown
+            echo "| [${HASH:0:7}](https://github.com/${{ github.repository }}/commit/${HASH}) | ${AUTHOR} | ${MESSAGE} | ${JIRA_ID} |" >> release-notes.md
+          done < commit_details.txt
+          
+          # Add Jira issues section to markdown
+          cat >> release-notes.md << EOF
+          
+          ## Jira Issues
+          EOF
+          
+          # Add each Jira ID as a list item to markdown
+          while read -r JIRA_ID; do
+            echo "* [${JIRA_ID}](${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}/browse/${JIRA_ID})" >> release-notes.md
+          done < jira_ids.txt
+      
+      - name: Authenticate with Jira
+        uses: atlassian/gajira-login@master
+        env:
+          JIRA_CLIENT_ID: ${{ secrets.JIRA_CLIENT_ID }}
+          JIRA_CLIENT_SECRET: ${{ secrets.JIRA_CLIENT_SECRET }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}
+      
+      - name: Create Jira Release Version
+        uses: atlassian/gajira-create-version@master
+        with:
+          name: ${{ steps.version.outputs.version }}
+          description: "Deployment to ${{ steps.workflow-details.outputs.environment }} environment"
+          project: ${{ secrets.JIRA_PROJECT_KEY }}
+          released: true
+          releaseDate: $(date +"%Y-%m-%d")
+      
+      - name: Associate Jira issues with the release
+        uses: actions/github-script@v6
+        env:
+          JIRA_IDS: ${{ steps.extract-details.outputs.jira_ids }}
+          JIRA_VERSION: ${{ steps.version.outputs.version }}
+        with:
+          script: |
+            const jiraIds = JSON.parse(process.env.JIRA_IDS);
+            const version = process.env.JIRA_VERSION;
+            
+            if (jiraIds.length === 0) {
+              console.log("No Jira IDs found in commits");
+              return;
+            }
+            
+            // For each Jira ID, update the fix version
+            for (const jiraId of jiraIds) {
+              try {
+                const exec = require('child_process').execSync;
+                const cmd = `curl -s -X PUT \
+                  -H "Authorization: Bearer ${{ secrets.JIRA_AUTH_TOKEN }}" \
+                  -H "Content-Type: application/json" \
+                  "${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}/rest/api/3/issue/${jiraId}" \
+                  -d '{"update":{"fixVersions":[{"add":{"name":"${version}"}}]}}'`;
+                
+                exec(cmd);
+                console.log(`Associated ${jiraId} with version ${version}`);
+              } catch (error) {
+                console.error(`Error associating ${jiraId} with version: ${error.message}`);
+              }
+            }
+      
+      - name: Create GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.version.outputs.version }}
+          name: "${{ steps.workflow-details.outputs.environment }} Release ${{ steps.version.outputs.version }}"
+          body: file://release-notes.md
+          artifacts: "release-notes.html,release-notes.md"
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Upload release notes as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes-${{ steps.version.outputs.version }}
+          path: |
+            release-notes.html
+            release-notes.md
+          retention-days: 90
