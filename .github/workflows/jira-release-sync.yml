@@ -85,7 +85,7 @@ jobs:
         if: github.event.action != 'deleted'
         env:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_CLOUD_INSTANCE_BASE_URL: ${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_PROJECT: ${{ secrets.JIRA_PROJECT }}
         run: |
@@ -121,7 +121,7 @@ jobs:
           # Check if release already exists
           EXISTING_VERSION=$(curl -s \
             -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
-            "$JIRA_BASE_URL/rest/api/3/project/$JIRA_PROJECT/versions" | \
+            "$JIRA_CLOUD_INSTANCE_BASE_URL/rest/api/3/project/$JIRA_PROJECT/versions" | \
             jq -r --arg name "$RELEASE_NAME" '.[] | select(.name==$name) | .id')
           
           if [ -n "$EXISTING_VERSION" ]; then
@@ -136,7 +136,7 @@ jobs:
                 \"released\": $IS_RELEASED,
                 \"releaseDate\": \"$RELEASE_DATE\"
               }" \
-              "$JIRA_BASE_URL/rest/api/3/version/$EXISTING_VERSION"
+              "$JIRA_CLOUD_INSTANCE_BASE_URL/rest/api/3/version/$EXISTING_VERSION"
             
             VERSION_ID=$EXISTING_VERSION
           else
@@ -152,7 +152,7 @@ jobs:
                 \"releaseDate\": \"$RELEASE_DATE\",
                 \"project\": \"$JIRA_PROJECT\"
               }" \
-              "$JIRA_BASE_URL/rest/api/3/version")
+              "$JIRA_CLOUD_INSTANCE_BASE_URL/rest/api/3/version")
             
             echo "Create response: $RESPONSE"
             VERSION_ID=$(echo "$RESPONSE" | jq -r '.id // ""')
@@ -165,7 +165,7 @@ jobs:
         if: github.event.action != 'deleted' && steps.extract_tickets.outputs.tickets != '[]'
         env:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_CLOUD_INSTANCE_BASE_URL: ${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           VERSION_ID: ${{ steps.create_jira_release.outputs.version_id }}
         run: |
@@ -183,14 +183,14 @@ jobs:
               -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
               -H "Content-Type: application/json" \
               -d "{\"update\": {\"fixVersions\": [{\"add\": {\"id\": \"$VERSION_ID\"}}]}}" \
-              "$JIRA_BASE_URL/rest/api/3/issue/$TICKET"
+              "$JIRA_CLOUD_INSTANCE_BASE_URL/rest/api/3/issue/$TICKET"
           done
       
       - name: Delete Jira release
         if: github.event.action == 'deleted'
         env:
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_CLOUD_INSTANCE_BASE_URL: ${{ secrets.JIRA_CLOUD_INSTANCE_BASE_URL }}
           JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
           JIRA_PROJECT: ${{ secrets.JIRA_PROJECT }}
         run: |
@@ -200,7 +200,7 @@ jobs:
           # Get the version ID
           VERSION_ID=$(curl -s \
             -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
-            "$JIRA_BASE_URL/rest/api/3/project/$JIRA_PROJECT/versions" | \
+            "$JIRA_CLOUD_INSTANCE_BASE_URL/rest/api/3/project/$JIRA_PROJECT/versions" | \
             jq -r --arg name "$RELEASE_VERSION" '.[] | select(.name==$name) | .id')
           
           # Delete the version if found
@@ -208,7 +208,7 @@ jobs:
             echo "Deleting version with ID: $VERSION_ID"
             curl -X DELETE \
               -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
-              "$JIRA_BASE_URL/rest/api/3/version/$VERSION_ID"
+              "$JIRA_CLOUD_INSTANCE_BASE_URL/rest/api/3/version/$VERSION_ID"
           else
             echo "No version found with name: $RELEASE_VERSION"
           fi
