@@ -1,154 +1,117 @@
-name: Generate Release Notes
+name: Sync GitHub Release to Jira
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version number for this release (e.g., 1.0.0)'
-        required: true
-        type: string
-      from_tag:
-        description: 'Starting tag/commit for release notes (default: previous release)'
-        required: false
-        type: string
-      to_tag:
-        description: 'Ending tag/commit for release notes (default: current HEAD)'
-        required: false
-        type: string
+  release:
+    types: [published, edited, deleted]
 
 jobs:
-  generate-release-notes:
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+  sync-to-jira:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          persist-credentials: false
       
-      - name: Get Release Token
-        id: get_workflow_token
-        uses: peter-murray/workflow-application-token-action@v3
-        with:
-          application_id: ${{ secrets.RELEASE_APP_ID }}
-          application_private_key: ${{ secrets.RELEASE_APP_CERT }}
-      
-      - name: Generate changelog
-        id: changelog
+      - name: Get release info
+        id: release_info
+        if: github.event.action != 'deleted'
         run: |
-          FROM_TAG="${{ github.event.inputs.from_tag }}"
-          TO_TAG="${{ github.event.inputs.to_tag || 'HEAD' }}"
-          
-          # If from_tag is not provided, use the latest tag
-          if [ -z "$FROM_TAG" ]; then
-            FROM_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-            # If no tags exist, use the first commit
-            if [ -z "$FROM_TAG" ]; then
-              FROM_TAG=$(git rev-list --max-parents=0 HEAD)
-              echo "No previous tags found. Using first commit as starting point."
-            else
-              echo "Using latest tag $FROM_TAG as starting point."
-            fi
-          fi
-          
-          echo "Generating changelog from $FROM_TAG to $TO_TAG"
-          
-          # Create a temporary file for changelog
-          echo "## Release v${{ github.event.inputs.version }}" > changelog.md
-          echo "" >> changelog.md
-          echo "### 🚀 New Features" >> changelog.md
-          
-          # Try conventional commits first
-          FEATURES=$(git log $FROM_TAG..$TO_TAG --pretty=format:"- %s (%h)" --grep="^feat" 2>/dev/null)
-          if [[ -z "$FEATURES" ]]; then
-            # Fall back to keyword-based search if no conventional commits
-            FEATURES=$(git log $FROM_TAG..$TO_TAG --pretty=format:"- %s (%h)" --grep="add\|new\|feature\|implement" 2>/dev/null)
-          fi
-          
-          if [[ -n "$FEATURES" ]]; then
-            echo "$FEATURES" >> changelog.md
+          echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "name=$(jq -r .release.name $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+          echo "body=$(jq -r .release.body $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+          echo "prerelease=$(jq -r .release.prerelease $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+          echo "published_at=$(jq -r .release.published_at $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+      
+      - name: Extract Jira tickets from release notes
+        if: github.event.action != 'deleted'
+        id: extract_tickets
+        run: |
+          TICKETS=$(echo "${{ steps.release_info.outputs.body }}" | grep -oE '[A-Z]+-[0-9]+' | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "tickets=$TICKETS" >> $GITHUB_OUTPUT
+      
+      - name: Get contributors since last release
+        if: github.event.action != 'deleted'
+        id: contributors
+        run: |
+          PREVIOUS_TAG=$(git tag --sort=-creatordate | grep -v ${GITHUB_REF#refs/tags/} | head -n 1)
+          if [ -z "$PREVIOUS_TAG" ]; then
+            CONTRIBUTORS=$(git log --format="%an" | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
           else
-            echo "- No new features in this release" >> changelog.md
+            CONTRIBUTORS=$(git log $PREVIOUS_TAG..HEAD --format="%an" | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))')
           fi
+          echo "list=$CONTRIBUTORS" >> $GITHUB_OUTPUT
+      
+      - name: Setup Jira CLI
+        uses: atlassian/gajira-cli@master
+        env:
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+      
+      - name: Create or update Jira release
+        if: github.event.action != 'deleted'
+        run: |
+          RELEASE_DESC="Release Notes:
+          ${{ steps.release_info.outputs.body }}
           
-          echo "" >> changelog.md
-          echo "### 🐛 Bug Fixes" >> changelog.md
+          Contributors: $(echo '${{ steps.contributors.outputs.list }}' | jq -r '. | join(", ")')
           
-          FIXES=$(git log $FROM_TAG..$TO_TAG --pretty=format:"- %s (%h)" --grep="^fix" 2>/dev/null)
-          if [[ -z "$FIXES" ]]; then
-            FIXES=$(git log $FROM_TAG..$TO_TAG --pretty=format:"- %s (%h)" --grep="fix\|bug\|issue\|resolve\|patch" 2>/dev/null)
-          fi
+          Associated Tickets: $(echo '${{ steps.extract_tickets.outputs.tickets }}' | jq -r '. | join(", ")')"
           
-          if [[ -n "$FIXES" ]]; then
-            echo "$FIXES" >> changelog.md
-          else
-            echo "- No bug fixes in this release" >> changelog.md
-          fi
+          IS_RELEASED=$([ "${{ steps.release_info.outputs.prerelease }}" == "false" ] && echo "true" || echo "false")
           
-          echo "" >> changelog.md
-          echo "### 🔄 Changes & Improvements" >> changelog.md
+          # Use Jira REST API to create or update the release
+          RELEASE_DATA=$(cat <<EOF
+          {
+            "name": "${{ steps.release_info.outputs.name }}",
+            "description": "$RELEASE_DESC",
+            "released": $IS_RELEASED,
+            "releaseDate": "${{ steps.release_info.outputs.published_at }}",
+            "project": "${{ secrets.JIRA_PROJECT }}"
+          }
+          EOF
+          )
           
-          OTHER_CHANGES=$(git log $FROM_TAG..$TO_TAG --pretty=format:"- %s (%h)" --grep="^refactor\|^chore\|^docs\|^style\|^test\|^ci\|^build\|^perf" 2>/dev/null)
-          if [[ -z "$OTHER_CHANGES" ]]; then
-            OTHER_CHANGES=$(git log $FROM_TAG..$TO_TAG --pretty=format:"- %s (%h)" --grep="update\|change\|improve\|refactor\|enhance" --invert-grep --grep="^feat\|^fix\|add\|new\|feature\|implement\|fix\|bug\|issue\|resolve\|patch" 2>/dev/null)
-          fi
-          
-          if [[ -n "$OTHER_CHANGES" ]]; then
-            echo "$OTHER_CHANGES" >> changelog.md
-          else
-            echo "- No other changes in this release" >> changelog.md
-          fi
-          
-          # List pull requests if there are any
-          PULL_REQUESTS=$(git log $FROM_TAG..$TO_TAG --pretty=format:"%s" | grep -o "#[0-9]\+" | sort -u)
-          if [[ -n "$PULL_REQUESTS" ]]; then
-            echo "" >> changelog.md
-            echo "### 🔀 Merged Pull Requests" >> changelog.md
-            for PR in $PULL_REQUESTS; do
-              PR_NUM=${PR#"#"}
-              PR_TITLE=$(curl -s -H "Authorization: token ${{ steps.get_workflow_token.outputs.token }}" \
-                              https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUM | \
-                         jq -r '.title')
-              if [[ "$PR_TITLE" != "null" ]]; then
-                echo "- $PR_TITLE ($PR)" >> changelog.md
-              fi
-            done
-          fi
-          
-          echo "" >> changelog.md
-          
-          # List contributors
-          echo "### 👥 Contributors" >> changelog.md
-          git log $FROM_TAG..$TO_TAG --pretty=format:"%an" | sort -u | while read name; do
-            echo "- $name" >> changelog.md
+          curl -X POST \
+            -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
+            -H "Content-Type: application/json" \
+            -d "$RELEASE_DATA" \
+            "$JIRA_BASE_URL/rest/api/3/version"
+      
+      - name: Link issues to release
+        if: github.event.action != 'deleted'
+        run: |
+          for TICKET in $(echo '${{ steps.extract_tickets.outputs.tickets }}' | jq -r '.[]'); do
+            echo "Linking $TICKET to release ${{ steps.release_info.outputs.version }}"
+            
+            # Get the version ID first
+            VERSION_ID=$(curl -s \
+              -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
+              "$JIRA_BASE_URL/rest/api/3/project/${{ secrets.JIRA_PROJECT }}/versions" | \
+              jq -r '.[] | select(.name=="${{ steps.release_info.outputs.name }}") | .id')
+            
+            # Add the fixVersion to the issue
+            curl -X PUT \
+              -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
+              -H "Content-Type: application/json" \
+              -d "{\"update\": {\"fixVersions\": [{\"add\": {\"id\": \"$VERSION_ID\"}}]}}" \
+              "$JIRA_BASE_URL/rest/api/3/issue/$TICKET"
           done
-          
-          # Save changelog content to GitHub output
-          CHANGELOG=$(cat changelog.md)
-          echo "changelog<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          
-          # Also save to file artifact
-          cat changelog.md > CHANGELOG.md
       
-      - name: Upload changelog artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: changelog-v${{ github.event.inputs.version }}
-          path: CHANGELOG.md
-          retention-days: 30
-      
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          token: ${{ steps.get_workflow_token.outputs.token }}
-          tag_name: v${{ github.event.inputs.version }}
-          name: Release v${{ github.event.inputs.version }}
-          body: ${{ steps.changelog.outputs.changelog }}
-          draft: false
-          prerelease: false
+      - name: Delete Jira release
+        if: github.event.action == 'deleted'
+        run: |
+          # Get the version ID first
+          RELEASE_VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_ID=$(curl -s \
+            -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
+            "$JIRA_BASE_URL/rest/api/3/project/${{ secrets.JIRA_PROJECT }}/versions" | \
+            jq -r '.[] | select(.name=="$RELEASE_VERSION") | .id')
+          
+          # Delete the version if found
+          if [ ! -z "$VERSION_ID" ]; then
+            curl -X DELETE \
+              -H "Authorization: Basic $(echo -n $JIRA_USER_EMAIL:$JIRA_API_TOKEN | base64)" \
+              "$JIRA_BASE_URL/rest/api/3/version/$VERSION_ID"
+          fi
