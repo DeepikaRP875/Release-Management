@@ -6,7 +6,7 @@ provider "aws" {
 resource "aws_ssm_parameter" "dev" {
   count = var.environment == "dev" ? 1 : 0
   
-  name  = "/config/dev/param"
+  name  = "/config/dev/devparameter"
   type  = "String"
   value = "Dpka"
   
@@ -19,7 +19,7 @@ resource "aws_ssm_parameter" "dev" {
 resource "aws_ssm_parameter" "uat" {
   count = var.environment == "uat" ? 1 : 0
   
-  name  = "/config/uat/parameters"
+  name  = "/config/uat/uatparameter"
   type  = "String"
   value = "dpka"
   
