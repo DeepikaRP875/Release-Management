@@ -6,7 +6,7 @@ provider "aws" {
 resource "aws_ssm_parameter" "dev" {
   count = var.environment == "dev" ? 1 : 0
   
-  name  = "/config/dev/parameters"
+  name  = "/config/dev/parameter"
   type  = "String"
   value = "Dpka"
   
