@@ -16,20 +16,16 @@ jobs:
       - name: Get the latest tag
         id: get_latest_tag
         run: |
-          latest_tag=$(git describe --tags `git rev-list --tags --max-count=1`)
+          latest_tag=$(git describe --tags `git rev-list --tags --max-count=1` 2>/dev/null || echo "v0.0.0")
           echo "::set-output name=latest_tag::$latest_tag"
 
       - name: Calculate new tag
         id: calculate_new_tag
         run: |
-          if [ -z "${{ steps.get_latest_tag.outputs.latest_tag }}" ]; then
-            new_tag="v1.0.0"
-          else
-            latest_tag=${{ steps.get_latest_tag.outputs.latest_tag }}
-            IFS='.' read -r -a tag_parts <<< "$latest_tag"
-            tag_parts[2]=$((tag_parts[2] + 1))
-            new_tag="${tag_parts[0]}.${tag_parts[1]}.${tag_parts[2]}"
-          fi
+          latest_tag=${{ steps.get_latest_tag.outputs.latest_tag }}
+          IFS='.' read -r -a tag_parts <<< "$latest_tag"
+          tag_parts[2]=$((tag_parts[2] + 1))
+          new_tag="${tag_parts[0]}.${tag_parts[1]}.${tag_parts[2]}"
           echo "::set-output name=new_tag::$new_tag"
 
       - name: Create new tag
